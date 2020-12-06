@@ -6,7 +6,9 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sn
 
+pd.set_option('display.max_columns', 10)
 
 # Loading data
 
@@ -256,10 +258,11 @@ df1['test_control_flag'] = df1['test_control_flag'].map({'control group':0,'camp
 df_final = pd.get_dummies(df1,columns=categorical_cols)
 
 #Check linear correlation between target value 'y' and rest of the features.
-correlation_matrix = df_final.corr()
+correlation_matrix = df1.corr()
 corr_list = correlation_matrix['y'].abs().sort_values(ascending=False)
-#print(corr_list)
-print(corr_list[1:11])
+print(corr_list)
+sn.heatmap(correlation_matrix, annot=True)
+plt.show()
 
 #Create target class column according to target value and control/campaign group for uplift modeling
 """ Control Non-Responders(CN)
@@ -296,6 +299,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import RandomOverSampler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import metrics
 
 # Preparation of training and test set
 X = df_final.drop(['y', 'test_control_flag', 'target_class'], axis=1)
@@ -328,4 +333,25 @@ numeric_cols = ['age','campaign', 'previous', 'emp.var.rate', 'cons.price.idx', 
 c_trans = ColumnTransformer([('Numeric columns', StandardScaler(), numeric_cols)], remainder='passthrough')
 X_scaled = c_trans.fit_transform(X_train_res)
 X_test = c_trans.transform(X_test) #Final transformation for test data
+
+# Random Forest Classifier
+rand_for = RandomForestClassifier(max_depth=12, random_state=42)
+rand_for.fit(X_scaled, y_train_res)
+
+predictions = pd.DataFrame(X_test).copy()
+rand_for_pred = rand_for.predict(X_test)
+rand_for_proba = rand_for.predict_proba(X_test)
+
+predictions['CN_proba'] = rand_for_proba[:,0]
+predictions['CR_proba'] = rand_for_proba[:,1]
+predictions['TN_proba'] = rand_for_proba[:,2]
+predictions['TR_proba'] = rand_for_proba[:,3]
+predictions['UpLift'] = predictions.eval('CN_proba+TR_proba-TN_proba-CR_proba')
+predictions['target_class'] = y_test
+
+print(metrics.classification_report(y_test, rand_for_pred))
+print(predictions)
+
+print(X_test)
+
 
