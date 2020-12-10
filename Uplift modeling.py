@@ -254,9 +254,6 @@ categorical_cols = ['job','marital','education','default','housing','pdays','loa
 df1['y'] = df1['y'].map({'no':0,'yes':1})
 df1['test_control_flag'] = df1['test_control_flag'].map({'control group':0,'campaign group':1})
 
-#Dummy
-df_final = pd.get_dummies(df1,columns=categorical_cols)
-
 #Check linear correlation between target value 'y' and rest of the features.
 correlation_matrix = df1.corr()
 corr_list = correlation_matrix['y'].abs().sort_values(ascending=False)
@@ -264,94 +261,104 @@ print(corr_list)
 sn.heatmap(correlation_matrix, annot=True)
 plt.show()
 
-#Create target class column according to target value and control/campaign group for uplift modeling
-""" Control Non-Responders(CN)
-    Customers that don't make a subscription without an offer (value = 0)
-    Control Responders(CR)
-    Customers that make a subscription without an offer (value = 1)
-    Treatment Non-Responders(TN)
-    Customers that don't make a subscription ang receive an offer (value = 2)
-    Treatment Responders(TR)
-    Customers that make a subscription and receive an offer (value = 3)
-    
-    LGWUM method
-    Uplift Score = P(TR)/P(T) + P(CN)/P(C) - P(TN)/P(T) - P(CR)/P(C)
-    P stands for probability
-    T stands for total campaigned amount (TR+TN)
-    C stands for total non campaigned amount (CN+CR)
-"""
-#CN
-df_final['target_class'] = 0
-#CR
-df_final.loc[(df_final.test_control_flag == 0) & (df_final.y == 1), 'target_class'] = 1
-#TN
-df_final.loc[(df_final.test_control_flag == 1) & (df_final.y == 0), 'target_class'] = 2
-#TR
-df_final.loc[(df_final.test_control_flag == 1) & (df_final.y == 1), 'target_class'] = 3
-
-# Final check
-df_final.head()
-df_final.columns
-df_final.info()
-
 # Machine learning libraries
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.ensemble import RandomForestClassifier
-from sklearn import metrics
+from sklearn.pipeline import Pipeline
+from sklift.models import ClassTransformation, TwoModels
+from sklift.metrics import uplift_at_k, qini_auc_score
+from sklift.viz import plot_qini_curve, plot_uplift_by_percentile
+from pylift.eval import UpliftEval
 
-# Preparation of training and test set
-X = df_final.drop(['y', 'test_control_flag', 'target_class'], axis=1)
-y = df_final['target_class']
+#Dataset preparation for uplift modeling
 
-print(X.shape)
-print(y.shape)
+df_uplift = pd.get_dummies(df1,columns=categorical_cols)
 
-# Data split
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-print('Number of entries in {} : {}'.format('X_train', X_train.shape[0]))
-print('Number of entries in {} : {}'.format('X_test', X_test.shape[0]))
+Xy_train, Xy_test = train_test_split(df_uplift, test_size=0.3, random_state=32)
+print('Number of entries in {} : {}'.format('X_train', Xy_train.shape[0]))
+print('Number of entries in {} : {}'.format('X_test', Xy_test.shape[0]))
+print('Number of entries in {} with target class = 0 : {}'.format('Xy_train', sum(Xy_train['y'] == 0)))
+print('Number of entries in {} with target class = 1 : {}'.format('Xy_train', sum(Xy_train['y'] == 1)))
+print('Number of entries in {} with no treatment : {}'.format('Xy_train', sum(Xy_train['test_control_flag'] == 0)))
+print('Number of entries in {} with treatment : {}'.format('Xy_train', sum(Xy_train['test_control_flag'] == 1)))
+
+X_train = Xy_train.drop(['y'], axis=1)
+y_train = Xy_train['y']
+X_test = Xy_test.drop(['y','test_control_flag'], axis=1)
+y_test = Xy_test['y']
+treatment_test = Xy_test['test_control_flag']
+
+random = RandomOverSampler(random_state=32)
+X_train, y_train= random.fit_sample(X_train, y_train)
+columns = X_train.columns
+X_train = pd.DataFrame(data=X_train, columns=columns)
+treatment_train = X_train['test_control_flag']
+X_train = X_train.drop(['test_control_flag'], axis=1)
 print('Number of entries in {} with target class = 0 : {}'.format('y_train', sum(y_train == 0)))
 print('Number of entries in {} with target class = 1 : {}'.format('y_train', sum(y_train == 1)))
-print('Number of entries in {} with target class = 2 : {}'.format('y_train', sum(y_train == 2)))
-print('Number of entries in {} with target class = 3 : {}'.format('y_train', sum(y_train == 3)))
+print('Number of entries in {} with no treatment : {}'.format('treatment_train', sum(treatment_train == 0)))
+print('Number of entries in {} with treatment : {}'.format('treatmeant_train', sum(treatment_train == 1)))
 
-# RandomOverSampler to ensure same amount of each class in training dataset
-random = RandomOverSampler(random_state=42)
-X_train_res, y_train_res = random.fit_sample(X_train, y_train.ravel())
-columns = X_train.columns
-X_train_res = pd.DataFrame(data=X_train_res, columns=columns)
-print('Number of entries in {} with target class = 0 : {}'.format('y_train_res', sum(y_train_res == 0)))
-print('Number of entries in {} with target class = 1 : {}'.format('y_train_res', sum(y_train_res == 1)))
-print('Number of entries in {} with target class = 2 : {}'.format('y_train_res', sum(y_train_res == 2)))
-print('Number of entries in {} with target class = 3 : {}'.format('y_train_res', sum(y_train_res == 3)))
-
-# Numeric column transformation with StandardScaler
 numeric_cols = ['age','campaign', 'previous', 'emp.var.rate', 'cons.price.idx', 'cons.conf.idx', 'euribor3m', 'nr.employed', 'duration']
-c_trans = ColumnTransformer([('Numeric columns', StandardScaler(), numeric_cols)], remainder='passthrough')
-X_scaled = c_trans.fit_transform(X_train_res)
-X_test = c_trans.transform(X_test) #Final transformation for test data
+col_trans = ColumnTransformer([('Numeric columns', StandardScaler(), numeric_cols)], remainder='passthrough')
+X_train = col_trans.fit_transform(X_train)
+X_test = col_trans.transform(X_test)
 
-# Random Forest Classifier
-rand_for = RandomForestClassifier(max_depth=12, random_state=42)
-rand_for.fit(X_scaled, y_train_res)
+#Class transformation approach
 
-predictions = pd.DataFrame(X_test).copy()
-rand_for_pred = rand_for.predict(X_test)
-rand_for_proba = rand_for.predict_proba(X_test)
+rand_for = RandomForestClassifier(max_depth=12, random_state=32)
+class_trans = ClassTransformation(estimator=rand_for)
 
-predictions['CN_proba'] = rand_for_proba[:,0]
-predictions['CR_proba'] = rand_for_proba[:,1]
-predictions['TN_proba'] = rand_for_proba[:,2]
-predictions['TR_proba'] = rand_for_proba[:,3]
-predictions['UpLift'] = predictions.eval('CN_proba+TR_proba-TN_proba-CR_proba')
-predictions['target_class'] = y_test
+pipeline = Pipeline([('model', class_trans)])
 
-print(metrics.classification_report(y_test, rand_for_pred))
-print(predictions)
+pipeline = pipeline.fit(X=X_train, y=y_train, model__treatment=treatment_train)
+uplift_ClassTrans = pipeline.predict(X_test)
 
-print(X_test)
+Uplift_ClassTrans = uplift_at_k(y_test, uplift_ClassTrans, treatment_test, strategy='by_group',k=0.4)
+AucScore_ClassTrans = qini_auc_score(y_test, uplift_ClassTrans, treatment_test)
 
+plot_qini_curve(y_true=y_test, uplift=uplift_ClassTrans, treatment=treatment_test, perfect=False)
+plot_uplift_by_percentile(y_true=y_test, uplift=uplift_ClassTrans, treatment=treatment_test, strategy='by_group', bins=10, kind='bar')
 
+upev_ClassTrans = UpliftEval(treatment_test, y_test, uplift_ClassTrans)
+upev_ClassTrans.plot(plot_type='aqini')
+
+#Two models approach
+
+tm = TwoModels(
+    estimator_trmnt = RandomForestClassifier(max_depth=12, random_state=32),
+    estimator_ctrl = RandomForestClassifier(max_depth=12, random_state=32),
+    method='vanilla')
+
+tm = tm.fit(X_train, y_train, treatment_train)
+uplift_TwoModels = tm.predict(X_test)
+
+Uplift_TwoModels = uplift_at_k(y_test, uplift_TwoModels, treatment_test, strategy='by_group', k=0.4)
+AucScore_TwoModels = qini_auc_score(y_test, uplift_TwoModels, treatment_test)
+
+plot_qini_curve(y_true=y_test, uplift=uplift_TwoModels, treatment=treatment_test, perfect=False)
+plot_uplift_by_percentile(y_true=y_test, uplift=uplift_TwoModels, treatment=treatment_test, strategy='by_group', bins=10, kind='bar')
+
+upev_TwoModels = UpliftEval(treatment_test, y_test, uplift_TwoModels)
+upev_TwoModels.plot(plot_type='aqini')
+
+# Results
+
+ModelsResults = {
+    'Approach': [],
+    'Uplift 40%': [],
+    'Qini Auc Score': []}
+
+ModelsResults['Approach'].append('Class Transformation')
+ModelsResults['Uplift 40%'].append(Uplift_ClassTrans)
+ModelsResults['Qini Auc Score'].append(AucScore_ClassTrans)
+
+ModelsResults['Approach'].append('Two Models')
+ModelsResults['Uplift 40%'].append(Uplift_TwoModels)
+ModelsResults['Qini Auc Score'].append(AucScore_TwoModels)
+
+Results = pd.DataFrame(data=ModelsResults)
+print(Results)
